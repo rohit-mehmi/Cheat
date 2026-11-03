@@ -78,18 +78,28 @@ textarea{width:100%;height:70px;resize:vertical}
   </section>
 </main>
 
-<script type="module">
-import { Chess } from './lib/chess.js';
+<script src="lib/chess.global.js"></script>
+<script>
 const GLYPH={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
 const $=id=>document.getElementById(id);
 let game=new Chess(), flipped=false, sel=null, last=null, mode='main', pending=0;
 let lines=[], threatSan='';
 
 // ---------- engine ----------
-const sf=new Worker('lib/stockfish.js');
-sf.onmessage=e=>onEngine(typeof e.data==='string'?e.data:String(e.data));
-sf.postMessage('uci'); sf.postMessage('setoption name MultiPV value 3'); sf.postMessage('isready');
+let sf=null;
+try{
+  sf=new Worker('lib/stockfish.js');
+  sf.onerror=engineFail;
+  sf.onmessage=e=>onEngine(typeof e.data==='string'?e.data:String(e.data));
+  sf.postMessage('uci'); sf.postMessage('setoption name MultiPV value 3'); sf.postMessage('isready');
+}catch(err){engineFail()}
+function engineFail(){
+  sf=null;
+  $('best').textContent='Engine not loaded';
+  $('status').innerHTML='The board still works, but the engine can\'t start when the page is opened as a file. Run <code>python3 -m http.server</code> in this folder and open <b>localhost:8000</b>, or put it on GitHub Pages.';
+}
 function analyze(fen,depth,multipv){
+  if(!sf)return;
   sf.postMessage('stop');
   sf.postMessage('setoption name MultiPV value '+multipv);
   sf.postMessage('position fen '+fen);
@@ -147,7 +157,7 @@ function run(){
     $('title').textContent='Game over';$('best').textContent='—';$('status').textContent=r;$('lines').innerHTML='';render();return;
   }
   $('title').textContent=myTurn()?'Best move for you':"Your friend's most likely moves";
-  $('best').textContent='…';$('status').textContent='Thinking…';
+  $('best').textContent='…';$('status').textContent=sf?'Thinking…':$('status').textContent;
   render();
   analyze(game.fen(),+$('depth').value,3);
 }
