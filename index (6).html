@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess Coach</title>
+<style>
+:root{--bg:#1d2433;--panel:#262f43;--ink:#e9ecf3;--mute:#9aa4bd;--light:#c9d0e4;--dark:#6c7ba3;--accent:#f0a93b;--good:#6fcf97;--bad:#eb6a6a;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,sans-serif}
+h1{font:600 1.5rem Georgia,serif;margin:0 0 .25rem}
+main{max-width:1000px;margin:0 auto;padding:1rem;display:grid;gap:1rem;grid-template-columns:minmax(0,560px) 1fr}
+@media(max-width:820px){main{grid-template-columns:1fr}}
+.boardwrap{display:flex;gap:8px}
+#bar{width:18px;background:#111;border-radius:4px;position:relative;overflow:hidden;flex:none}
+#barw{position:absolute;bottom:0;left:0;right:0;background:#f4f4f4;height:50%;transition:height .3s}
+#board{position:relative;flex:1;aspect-ratio:1;display:grid;grid-template:repeat(8,1fr)/repeat(8,1fr);border-radius:4px;overflow:hidden;user-select:none}
+.sq{display:flex;align-items:center;justify-content:center;font-size:min(8vw,46px);cursor:pointer;position:relative;line-height:1}
+.sq.l{background:var(--light)}.sq.d{background:var(--dark)}
+.sq.sel{outline:4px solid var(--accent);outline-offset:-4px}
+.sq.dest::after{content:"";width:28%;height:28%;border-radius:50%;background:rgba(29,36,51,.35);position:absolute}
+.sq.last{box-shadow:inset 0 0 0 100px rgba(240,169,59,.35)}
+.w{color:#fff;text-shadow:0 0 2px #000,0 0 2px #000,0 0 3px #000}.b{color:#10131c}
+#arrows{position:absolute;inset:0;pointer-events:none}
+.panel{background:var(--panel);border-radius:8px;padding:1rem}
+.panel h2{font:600 1rem Georgia,serif;margin:0 0 .5rem}
+.row{display:flex;gap:.5rem;flex-wrap:wrap;margin:.5rem 0}
+button,select,textarea{font:inherit;background:#33405c;color:var(--ink);border:1px solid #44527a;border-radius:6px;padding:.4rem .7rem}
+button{cursor:pointer}button:hover{background:#3d4c6d}
+button:focus-visible,.sq:focus-visible{outline:2px solid var(--accent)}
+textarea{width:100%;height:70px;resize:vertical}
+.best{font:700 1.6rem Georgia,serif;color:var(--accent)}
+.line{padding:.35rem 0;border-top:1px solid #384463;font-size:.92rem}
+.line b{display:inline-block;min-width:3.4rem}
+.mute{color:var(--mute)}.good{color:var(--good)}.bad{color:var(--bad)}
+#moves{font-size:.9rem;color:var(--mute);margin:.5rem 0 0;word-break:break-word}
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h1>Chess Coach</h1>
+    <p class="mute" style="margin:0 0 .75rem">Play your friend's move on the board, then play yours. The engine tells you what to do next.</p>
+    <div class="boardwrap">
+      <div id="bar" title="Evaluation"><div id="barw"></div></div>
+      <div id="board" role="grid" aria-label="Chess board"><svg id="arrows" viewBox="0 0 8 8"></svg></div>
+    </div>
+    <div class="row">
+      <button id="undo">Undo</button>
+      <button id="flip">Flip board</button>
+      <button id="reset">New game</button>
+      <label class="mute">I play
+        <select id="me"><option value="w">White</option><option value="b">Black</option></select>
+      </label>
+      <label class="mute">Strength
+        <select id="depth"><option value="12">Fast (depth 12)</option><option value="16" selected>Strong (depth 16)</option><option value="20">Max (depth 20, slower)</option></select>
+      </label>
+    </div>
+    <p id="moves"></p>
+  </section>
+
+  <section style="display:grid;gap:1rem;align-content:start">
+    <div class="panel">
+      <h2 id="title">Best move for you</h2>
+      <div class="best" id="best">…</div>
+      <div id="status" class="mute">Loading engine…</div>
+      <div id="lines"></div>
+    </div>
+    <div class="panel">
+      <h2>What your friend threatens</h2>
+      <div id="threat" class="mute">Shown on your turn: his best move if you did nothing.</div>
+    </div>
+    <div class="panel">
+      <h2>Paste a game from chess.com</h2>
+      <textarea id="pgn" placeholder="On chess.com open the game → Share → PGN, paste it here"></textarea>
+      <div class="row"><button id="loadpgn">Load PGN</button></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+import { Chess } from './lib/chess.js';
+const GLYPH={p:'♟',n:'♞',b:'♝',r:'♜',q:'♛',k:'♚'};
+const $=id=>document.getElementById(id);
+let game=new Chess(), flipped=false, sel=null, last=null, mode='main', pending=0;
+let lines=[], threatSan='';
+
+// ---------- engine ----------
+const sf=new Worker('lib/stockfish.js');
+sf.onmessage=e=>onEngine(typeof e.data==='string'?e.data:String(e.data));
+sf.postMessage('uci'); sf.postMessage('setoption name MultiPV value 3'); sf.postMessage('isready');
+function analyze(fen,depth,multipv){
+  sf.postMessage('stop');
+  sf.postMessage('setoption name MultiPV value '+multipv);
+  sf.postMessage('position fen '+fen);
+  pending++;
+  sf.postMessage('go depth '+depth);
+}
+function onEngine(msg){
+  if(msg==='readyok'){$('status').textContent='Engine ready.';run();return}
+  if(msg.startsWith('info')&&msg.includes(' pv ')&&msg.includes('score')&&pending<=1){
+    const g=re=>(msg.match(re)||[])[1];
+    const depth=+g(/ depth (\d+)/), mpv=+(g(/ multipv (\d+)/)||1);
+    const cp=g(/score cp (-?\d+)/), mate=g(/score mate (-?\d+)/);
+    const pv=msg.split(' pv ')[1].trim().split(' ');
+    const stm=curFen().split(' ')[1];
+    const sign=stm==='w'?1:-1; // convert to White's point of view
+    const L={depth,mpv,pv,cp:cp!==undefined?+cp*sign:null,mate:mate!==undefined?+mate*sign:null,rawCp:cp!==undefined?+cp:null,rawMate:mate!==undefined?+mate:null};
+    if(mode==='main'){lines[mpv-1]=L;renderMain()}
+    else if(mode==='threat'&&mpv===1){threatLine=L;renderThreat()}
+  }
+  if(msg.startsWith('bestmove')){
+    pending=Math.max(0,pending-1);
+    if(pending===0&&mode==='main'){startThreat()}
+  }
+}
+let threatLine=null, threatFen='';
+function curFen(){return mode==='threat'?threatFen:game.fen()}
+
+// ---------- helpers ----------
+function sanLine(fen,pv,n=6){
+  const c=new Chess(fen),out=[];
+  for(const u of pv.slice(0,n)){
+    try{const m=c.move({from:u.slice(0,2),to:u.slice(2,4),promotion:u[4]});out.push(m.san)}catch{break}
+  }
+  return out;
+}
+function scoreText(L,forMover){ // forMover: show from side-to-move's view
+  if(L.rawMate!==null) return (L.rawMate>0?'Mate in ':'Mated in ')+Math.abs(L.rawMate);
+  const v=L.rawCp/100; return (v>0?'+':'')+v.toFixed(2);
+}
+function setBar(L){
+  let p=50;
+  if(L.mate!==null)p=L.mate>0?100:0; else p=100/(1+Math.exp(-L.cp/180));
+  $('barw').style.height=p+'%';
+  $('bar').style.transform=flipped?'rotate(180deg)':'';
+}
+
+// ---------- run analysis ----------
+function myTurn(){return game.turn()===$('me').value}
+function run(){
+  lines=[]; threatLine=null; mode='main';
+  $('threat').textContent=myTurn()?'Working it out…':'Shown on your turn: his best move if you did nothing.';
+  $('arrows').innerHTML='';
+  if(game.isGameOver()){
+    const r=game.isCheckmate()?(game.turn()==='w'?'Black':'White')+' wins by checkmate.':'Game over: draw.';
+    $('title').textContent='Game over';$('best').textContent='—';$('status').textContent=r;$('lines').innerHTML='';render();return;
+  }
+  $('title').textContent=myTurn()?'Best move for you':"Your friend's most likely moves";
+  $('best').textContent='…';$('status').textContent='Thinking…';
+  render();
+  analyze(game.fen(),+$('depth').value,3);
+}
+function renderMain(){
+  const fen=game.fen();
+  if(!lines[0])return;
+  const top=lines[0], first=sanLine(fen,top.pv,1)[0];
+  $('best').textContent=first||'…';
+  $('status').textContent='Depth '+top.depth+' · '+scoreText(top)+(myTurn()?' for you':' for the side to move');
+  setBar(top);
+  $('lines').innerHTML=lines.filter(Boolean).map(L=>{
+    const s=sanLine(fen,L.pv,7).join(' ');
+    return `<div class="line"><b>${scoreText(L)}</b> ${s}</div>`}).join('');
+  drawArrows();
+}
+function startThreat(){
+  if(!myTurn()||game.inCheck()){ $('threat').textContent=game.inCheck()&&myTurn()?'You are in check: deal with that first.':'Shown on your turn: his best move if you did nothing.'; return}
+  const p=game.fen().split(' ');p[1]=p[1]==='w'?'b':'w';p[3]='-';
+  threatFen=p.join(' ');mode='threat';
+  analyze(threatFen,Math.min(14,+$('depth').value),1);
+}
+function renderThreat(){
+  if(!threatLine)return;
+  const s=sanLine(threatFen,threatLine.pv,4).join(' ');
+  const raw=threatLine.rawMate!==null?`mate in ${Math.abs(threatLine.rawMate)}`:(threatLine.rawCp/100).toFixed(2);
+  const danger=threatLine.rawMate>0||threatLine.rawCp>=150;
+  $('threat').innerHTML=`<span class="${danger?'bad':'good'}">${danger?'Serious threat: ':'Nothing scary: '}</span>${s} <span class="mute">(${raw} for him)</span>`;
+  drawArrows();
+}
+
+// ---------- board ----------
+function sqName(i){const f=i%8,r=Math.floor(i/8);return 'abcdefgh'[flipped?7-f:f]+(flipped?r+1:8-r)}
+function render(){
+  const b=$('board');b.querySelectorAll('.sq').forEach(n=>n.remove());
+  const dests=sel?game.moves({square:sel,verbose:true}).map(m=>m.to):[];
+  for(let i=0;i<64;i++){
+    const n=sqName(i),f='abcdefgh'.indexOf(n[0]),r=+n[1];
+    const piece=game.get(n);
+    const d=document.createElement('div');
+    d.className='sq '+((f+r)%2===1?'l':'d')+(sel===n?' sel':'')+(dests.includes(n)?' dest':'')+(last&&(last.from===n||last.to===n)?' last':'');
+    d.tabIndex=0;d.setAttribute('aria-label',n+(piece?' '+piece.color+piece.type:''));
+    if(piece){const s=document.createElement('span');s.className=piece.color;s.textContent=GLYPH[piece.type];d.appendChild(s)}
+    d.onclick=()=>clickSq(n);
+    d.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();clickSq(n)}};
+    b.insertBefore(d,$('arrows'));
+  }
+  const h=game.history();let t='';
+  h.forEach((m,i)=>{t+=(i%2===0?(i/2+1)+'. ':'')+m+' '});
+  $('moves').textContent=t||'No moves yet.';
+}
+function clickSq(n){
+  const p=game.get(n);
+  if(sel){
+    const ok=game.moves({square:sel,verbose:true}).find(m=>m.to===n);
+    if(ok){ // promotions default to queen
+      const m=game.move({from:sel,to:n,promotion:'q'});last={from:m.from,to:m.to};sel=null;run();return}
+  }
+  sel=(p&&p.color===game.turn()&&sel!==n)?n:null;render();
+}
+function drawArrows(){
+  const pt=s=>{const f='abcdefgh'.indexOf(s[0]),r=+s[1];return[(flipped?7-f:f)+.5,(flipped?r-1:8-r)+.5]};
+  const one=(uci,color,id,dash)=>{
+    const a=pt(uci.slice(0,2)),b=pt(uci.slice(2,4));
+    return `<marker id="${id}" markerWidth="4" markerHeight="4" refX="2.2" refY="2" orient="auto"><path d="M0,0L4,2L0,4z" fill="${color}"/></marker><line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke="${color}" stroke-width=".16" stroke-linecap="round" opacity=".85" ${dash?'stroke-dasharray=".25 .2"':''} marker-end="url(#${id})"/>`};
+  let h='';
+  if(lines[0])h+=one(lines[0].pv[0],'#f0a93b','ab',false);
+  if(threatLine&&myTurn())h+=one(threatLine.pv[0],'#eb6a6a','at',true);
+  $('arrows').innerHTML=h;
+}
+
+// ---------- controls ----------
+$('undo').onclick=()=>{game.undo();last=null;sel=null;run()};
+$('flip').onclick=()=>{flipped=!flipped;render();renderMain();if(threatLine)renderThreat()};
+$('reset').onclick=()=>{game=new Chess();last=null;sel=null;run()};
+$('me').onchange=()=>{flipped=$('me').value==='b';run()};
+$('depth').onchange=run;
+$('loadpgn').onclick=()=>{
+  const g=new Chess();
+  try{g.loadPgn($('pgn').value.trim());game=g;const h=g.history({verbose:true});last=h.length?{from:h[h.length-1].from,to:h[h.length-1].to}:null;sel=null;run()}
+  catch{$('status').textContent='Could not read that PGN. Copy the whole thing from chess.com (Share → PGN).'}
+};
+render();
+</script>
+</body>
+</html>
